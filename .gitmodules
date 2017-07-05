@@ -1,0 +1,3 @@
+[submodule "ui/unpublished-packages/avh4/elm-newcheck"]
+	path = ui/unpublished-packages/avh4/elm-newcheck
+	url = https://github.com/avh4/elm-newcheck.git
