@@ -12,18 +12,72 @@ import Task
 
 type alias TestModel =
     { files : Dict String File
+    , elmFiles : Dict ModuleName SourceDef
     }
-
-
-type File
-    = ElmSource
-    | CompiledElm
 
 
 initialModel : TestModel
 initialModel =
     { files = Dict.empty
+    , elmFiles = Dict.empty
     }
+
+
+type alias ModuleName =
+    List String
+
+
+anyModuleName : Fuzzer ModuleName
+anyModuleName =
+    Fuzz.oneOf
+        [ Fuzz.constant [ "A" ]
+        , Fuzz.constant [ "Foo" ]
+
+        -- , Fuzz.constant [ "Foo", "B" ]
+        -- , Fuzz.constant [ "String", "Extra" ]
+        , Fuzz.constant [ "Main" ]
+        ]
+
+
+type alias SourceDef =
+    { deps : List ModuleName
+    , value : String
+    }
+
+
+anySourceDef : Fuzzer SourceDef
+anySourceDef =
+    Fuzz.map2 SourceDef
+        (Fuzz.list anyModuleName)
+        Fuzz.string
+
+
+elmFile : ModuleName -> SourceDef -> String
+elmFile name def =
+    String.join "\n"
+        [ "module " ++ String.join "." name ++ " exposing (main, value)"
+        , "import Html exposing (Html)"
+        , def.deps
+            |> List.map (\n -> "import " ++ String.join "." n)
+            |> String.join "\n"
+        , ""
+        , "value : String"
+        , "value = " ++ toString def.value
+        , ""
+        , "main : Html msg"
+        , "main = "
+        , "    Html.text <| "
+        , "    String.join \":\""
+        , def.deps
+            |> List.map (\n -> String.join "." n ++ ".value")
+            |> String.join "\n        , "
+            |> (++) "        [ "
+        , "        ]"
+        ]
+
+
+type File
+    = CompiledElm
 
 
 anyFilename : Fuzzer String
@@ -69,41 +123,57 @@ main =
         , actions =
             [ readAndModify1
                 { name = "compile"
-                , pre =
-                    \filename test ->
-                        case Dict.get filename test.files of
-                            Just ElmSource ->
-                                Ok ()
-
-                            Nothing ->
-                                Err "file doesn't exist"
-
-                            Just _ ->
-                                Err "file isn't an Elm source file"
-                , arg = anyFilename
+                , arg = anyModuleName
                 , action =
                     \filename () ->
                         post "compile"
-                            [ ( "filename", Encode.string filename ) ]
+                            [ ( "filename", Encode.string (String.join "/" filename ++ ".elm") ) ]
                 , test =
                     \filename test ->
-                        ( Ok { code = 0, stdout = "", stderr = "" }
-                        , { test | files = Dict.insert filename CompiledElm test.files }
-                        )
+                        let
+                            output =
+                                "index.html"
+                        in
+                        case Dict.get filename test.elmFiles of
+                            Nothing ->
+                                PreconditionFailed "elm file doesn't exist"
+
+                            Just _ ->
+                                Check <|
+                                    \actual ->
+                                        case actual of
+                                            Err _ ->
+                                                Err ("Expected Ok, but got: " ++ toString actual)
+
+                                            Ok response ->
+                                                if response.code == 0 then
+                                                    -- if String.contains ("Successfully generated " ++ output ++ "\n") response.stdout then
+                                                    Ok { test | files = Dict.insert output CompiledElm test.files }
+                                                else
+                                                    Err ("Compilation failed: " ++ toString response)
                 }
-            , readAndModify1
+            , readAndModify2
                 { name = "writeElmFile"
-                , pre = \filename test -> Ok ()
-                , arg = anyFilename
+                , arg1 = anyModuleName
+                , arg2 = anySourceDef
                 , action =
-                    \filename () ->
+                    \filename def () ->
                         post "writeElmFile"
-                            [ ( "filename", Encode.string filename ) ]
+                            [ ( "filename", Encode.string (String.join "/" filename ++ ".elm") )
+                            , ( "content", Encode.string (elmFile filename def) )
+                            ]
                 , test =
-                    \filename test ->
-                        ( Ok { code = 0, stdout = "", stderr = "" }
-                        , { test | files = Dict.insert filename ElmSource test.files }
-                        )
+                    \filename def test ->
+                        Check <|
+                            \actual ->
+                                if actual == Ok { code = 0, stdout = "", stderr = "" } then
+                                    Ok
+                                        { test
+                                            | elmFiles =
+                                                Dict.insert filename def test.elmFiles
+                                        }
+                                else
+                                    Err "actual didn't match"
                 }
             ]
         }

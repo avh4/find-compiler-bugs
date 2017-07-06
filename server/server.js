@@ -47,9 +47,10 @@ app.post("/compile", function(req, res) {
 
 app.post("/writeElmFile", function(req, res) {
   const filename = req.body.filename;
+  const content = req.body.content;
   console.log("writeElmFile", filename);
 
-  fs.writeFile(path.join("work", filename), "empty", function(err) {
+  fs.writeFile(path.join("work", filename), content, function(err) {
     if (err) {
       console.log("Err", err);
       res.send({
