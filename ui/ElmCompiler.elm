@@ -7,6 +7,8 @@ import Fuzz.Action.Task exposing (..)
 import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
+import Process
+import Set exposing (Set)
 import Task
 
 
@@ -31,11 +33,12 @@ anyModuleName : Fuzzer ModuleName
 anyModuleName =
     Fuzz.oneOf
         [ Fuzz.constant [ "A" ]
-        , Fuzz.constant [ "Foo" ]
+        , Fuzz.constant [ "B" ]
+        , Fuzz.constant [ "C" ]
 
         -- , Fuzz.constant [ "Foo", "B" ]
         -- , Fuzz.constant [ "String", "Extra" ]
-        , Fuzz.constant [ "Main" ]
+        -- , Fuzz.constant [ "Main" ]
         ]
 
 
@@ -54,10 +57,17 @@ anySourceDef =
 
 elmFile : ModuleName -> SourceDef -> String
 elmFile name def =
+    let
+        deps =
+            def.deps
+                |> Set.fromList
+                |> Set.remove name
+                |> Set.toList
+    in
     String.join "\n"
         [ "module " ++ String.join "." name ++ " exposing (main, value)"
         , "import Html exposing (Html)"
-        , def.deps
+        , deps
             |> List.map (\n -> "import " ++ String.join "." n)
             |> String.join "\n"
         , ""
@@ -67,9 +77,11 @@ elmFile name def =
         , "main : Html msg"
         , "main = "
         , "    Html.text <| "
+        , "    Debug.log \"" ++ String.join "." name ++ "\" <|"
         , "    String.join \":\""
-        , def.deps
+        , deps
             |> List.map (\n -> String.join "." n ++ ".value")
+            |> (::) "value"
             |> String.join "\n        , "
             |> (++) "        [ "
         , "        ]"
@@ -77,16 +89,7 @@ elmFile name def =
 
 
 type File
-    = CompiledElm
-
-
-anyFilename : Fuzzer String
-anyFilename =
-    Fuzz.oneOf
-        [ Fuzz.constant "Main.elm"
-        , Fuzz.constant "A.elm"
-        , Fuzz.constant "ggg.elm"
-        ]
+    = CompiledElm String
 
 
 type alias Response =
@@ -107,7 +110,7 @@ responseDecoder =
 main =
     Fuzz.Action.Program.program
         { seed = 1
-        , fuzz = 2
+        , fuzz = 10
         , real =
             post "reset" []
                 |> Task.andThen
@@ -127,18 +130,52 @@ main =
                 , action =
                     \filename () ->
                         post "compile"
-                            [ ( "filename", Encode.string (String.join "/" filename ++ ".elm") ) ]
+                            [ ( "filename", Encode.string (String.join "/" filename ++ ".elm") )
+                            , ( "output"
+                              , Encode.string <|
+                                    if filename == [ "A" ] then
+                                        "elm.js"
+                                    else
+                                        "other.js"
+                              )
+                            ]
+                            |> -- Sleep here to work around https://github.com/elm-lang/elm-make/issues/172
+                               Task.andThen (\x -> Process.sleep 1000 |> Task.map (always x))
                 , test =
                     \filename test ->
                         let
                             output =
-                                "index.html"
-                        in
-                        case Dict.get filename test.elmFiles of
-                            Nothing ->
-                                PreconditionFailed "elm file doesn't exist"
+                                if filename == [ "A" ] then
+                                    "elm.js"
+                                else
+                                    "other.js"
 
-                            Just _ ->
+                            verifyGraph _ _ =
+                                if
+                                    List.all (flip Dict.member test.elmFiles)
+                                        [ [ "A" ], [ "B" ], [ "C" ] ]
+                                then
+                                    Ok ()
+                                else
+                                    Err ("Missing files: " ++ toString (Dict.keys test.elmFiles))
+
+                            -- verifyGraph : ModuleName -> Set ModuleName -> Result String ()
+                            -- verifyGraph f seen =
+                            --     if Set.member f seen then
+                            --         Err "Circular dependency in Elm files"
+                            --     else
+                            --         case Dict.get f test.elmFiles of
+                            --             Nothing ->
+                            --                 Err ("elm file doesn't exist: " ++ toString f)
+                            --             Just def ->
+                            --                 def.deps
+                            --                     |> List.foldl (\dep r -> Result.andThen (always <| verifyGraph dep (Set.insert f seen)) r) (Ok ())
+                        in
+                        case verifyGraph filename Set.empty of
+                            Err reason ->
+                                PreconditionFailed reason
+
+                            Ok () ->
                                 Check <|
                                     \actual ->
                                         case actual of
@@ -148,16 +185,57 @@ main =
                                             Ok response ->
                                                 if response.code == 0 then
                                                     -- if String.contains ("Successfully generated " ++ output ++ "\n") response.stdout then
-                                                    Ok { test | files = Dict.insert output CompiledElm test.files }
+                                                    case [ "A", "B", "C" ] |> List.map (List.singleton >> flip Dict.get test.elmFiles >> Maybe.map .value) of
+                                                        [ Just a, Just b, Just c ] ->
+                                                            let
+                                                                exp =
+                                                                    String.join ""
+                                                                        [ "C: \"" ++ c ++ "\"\n"
+                                                                        , "B: \"" ++ b ++ ":" ++ c ++ "\"\n"
+                                                                        , "A: \"" ++ a ++ ":" ++ b ++ ":" ++ c ++ "\"\n"
+                                                                        ]
+                                                            in
+                                                            Ok { test | files = Dict.insert output (CompiledElm exp) test.files }
+
+                                                        _ ->
+                                                            Ok test
                                                 else
                                                     Err ("Compilation failed: " ++ toString response)
                 }
             , readAndModify2
-                { name = "writeElmFile"
+                { name = "changeElmValue"
                 , arg1 = anyModuleName
-                , arg2 = anySourceDef
+                , arg2 =
+                    Fuzz.oneOf (List.map Fuzz.constant [ "abc", "def", "ghi", "jkl", "mno", "pqr", "stu", "vwx", "zy_" ])
+                        |> Fuzz.map
+                            (\value filename ->
+                                case filename of
+                                    [ "A" ] ->
+                                        { deps = [ [ "B" ], [ "C" ] ]
+                                        , value = value
+                                        }
+
+                                    [ "B" ] ->
+                                        { deps = [ [ "C" ] ]
+                                        , value = value
+                                        }
+
+                                    [ "C" ] ->
+                                        { deps = []
+                                        , value = value
+                                        }
+
+                                    _ ->
+                                        { deps = []
+                                        , value = value
+                                        }
+                            )
                 , action =
-                    \filename def () ->
+                    \filename value () ->
+                        let
+                            def =
+                                value filename
+                        in
                         post "writeElmFile"
                             [ ( "filename", Encode.string (String.join "/" filename ++ ".elm") )
                             , ( "content", Encode.string (elmFile filename def) )
@@ -170,10 +248,43 @@ main =
                                     Ok
                                         { test
                                             | elmFiles =
-                                                Dict.insert filename def test.elmFiles
+                                                Dict.insert filename (def filename) test.elmFiles
                                         }
                                 else
                                     Err "actual didn't match"
+                }
+            , readAndModify0
+                { name = "eval"
+                , action =
+                    \() ->
+                        post "eval"
+                            [ ( "filename", Encode.string "elm.js" )
+                            ]
+                , test =
+                    \test ->
+                        case [ "A", "B", "C" ] |> List.map (List.singleton >> flip Dict.get test.elmFiles >> Maybe.map .value) of
+                            [ Just a, Just b, Just c ] ->
+                                case Dict.get "elm.js" test.files of
+                                    Just (CompiledElm exp) ->
+                                        Check <|
+                                            \actual ->
+                                                case actual of
+                                                    Err _ ->
+                                                        Err ("Expected Ok, but got: " ++ toString actual)
+
+                                                    Ok response ->
+                                                        if response.code /= 0 then
+                                                            Err ("Compilation failed: " ++ toString response)
+                                                        else if response.stdout /= exp then
+                                                            Err ("expected " ++ exp ++ ", got: " ++ response.stdout)
+                                                        else
+                                                            Ok test
+
+                                    _ ->
+                                        PreconditionFailed "elm.js isn't compiled yet"
+
+                            _ ->
+                                PreconditionFailed ("Missing elm files: " ++ toString (Dict.keys test.elmFiles))
                 }
             ]
         }

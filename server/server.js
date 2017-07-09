@@ -19,11 +19,12 @@ app.use(bodyParser.json()); // support json encoded bodies
 
 app.post("/compile", function(req, res) {
   const filename = req.body.filename;
-  console.log("compile", filename);
+  const output = req.body.output;
+  console.log("compile", filename, output);
 
   child_process.execFile(
     "elm-make",
-    ["--yes", filename],
+    ["--yes", filename, "--output", output],
     { cwd: "work" },
     function(err, stdout, stderr) {
       if (err) {
@@ -45,6 +46,33 @@ app.post("/compile", function(req, res) {
   );
 });
 
+app.post("/eval", function(req, res) {
+    const filename = req.body.filename;
+    console.log("eval", filename);
+
+    child_process.execFile(
+        "node",
+        [filename],
+        { cwd: "work" },
+        function(err, stdout, stderr) {
+            if (err) {
+                console.log("Err", stderr);
+                res.send({
+                    code: err.code,
+                    stdout: stdout,
+                    stderr: stderr
+                });
+            } else {
+                console.log("OK");
+                res.send({
+                    code: 0,
+                    stdout: stdout,
+                    stderr: stderr
+                });
+            }
+        }
+    );
+});
 app.post("/writeElmFile", function(req, res) {
   const filename = req.body.filename;
   const content = req.body.content;
